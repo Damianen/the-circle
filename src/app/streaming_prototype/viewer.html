@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Inter, system-ui, -apple-system, sans-serif;
+            background: #0e0e10;
+            color: #efeff1;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .sidebar {
+            background: #1f1f23;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        #streams {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        #streams li {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #2d2d32;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        #streams li:hover {
+            background: #3f3f43;
+        }
+        #remoteVideo {
+            width: 100%;
+            background: #000;
+            border-radius: 8px;
+        }
+        button {
+            background: #00b341;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #00982f;
+        }
+        button:disabled {
+            background: #1f1f23;
+            cursor: not-allowed;
+        }
+        #viewer-warning {
+            color: #ff0000;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="sidebar">
+        <button id="refresh">Refresh Streams</button>
+        <ul id="streams"></ul>
+    </div>
+    <div class="main">
+        <video id="remoteVideo" autoplay playsinline controls></video>
+        <div id="viewer-warning"></div>
+    </div>
+</div>
+<script type="module">
+    import { v4 as uuidv4 } from 'https://cdn.skypack.dev/uuid';
+
+    // Use dynamic WSS URL based on current hostname
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsHost = location.hostname;
+    const wsPort = 3000;
+    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+    const socket = new WebSocket(wsUrl);
+
+    const remoteVideo = document.getElementById("remoteVideo");
+    const streamList = document.getElementById("streams");
+    const refreshBtn = document.getElementById("refresh");
+    const warningDiv = document.getElementById("viewer-warning");
+
+    const id = uuidv4();
+    let currentStreamId = null;
+    let currentStreamerId = null;
+    let peer = null;
+
+    let wsOpen = false;
+
+    socket.onopen = () => {
+        wsOpen = true;
+        console.log("[WS] Viewer WebSocket connected to", wsUrl);
+        warningDiv.textContent = "";
+        refreshBtn.disabled = false;
+        // Auto-load streams on connection
+        socket.send(JSON.stringify({ type: "get-streams" }));
+    };
+
+    socket.onclose = (e) => {
+        wsOpen = false;
+        console.log("[WS] Viewer WebSocket closed", e);
+        if (e.code === 1015) {
+            // Redirect to signaling server to accept certificate
+            const signalingUrl = `https://${wsHost}:${wsPort}/viewer`;
+            console.log("[WS] Redirecting to accept certificate:", signalingUrl);
+            window.location.href = signalingUrl;
+            return;
+        }
+        let extra = "";
+        if (e.code === 1015) {
+            extra = `
+                    <br><b>WebSocket error code 1015:</b> This usually means a TLS/SSL handshake failure.<br>
+                    <ul>
+                      <li>Did you accept the self-signed certificate warning in your browser?</li>
+                      <li>Are you using the <b>same hostname/IP</b> in the browser URL and for your certificate?</li>
+                      <li>If you use <b>localhost</b> in the browser, your cert must be for localhost.<br>
+                          If you use your LAN IP (e.g. 192.168.x.x), your cert must be for that IP.</li>
+                      <li>Try opening <b>https://${wsHost}:3000</b> in your browser and accept the certificate warning, then reload this page.</li>
+                      <li>If you changed your IP/hostname, regenerate your certs with the correct Common Name (CN).</li>
+                    </ul>
+                `;
+        }
+        warningDiv.innerHTML = `WebSocket connection to signaling server closed.<br>
+                <b>URL:</b> ${wsUrl}<br>
+                <b>Code:</b> ${e.code} <b>Reason:</b> ${e.reason}<br>
+                ${extra}`;
+        refreshBtn.disabled = true;
+    };
+
+    socket.onerror = (e) => {
+        wsOpen = false;
+        warningDiv.textContent = `Could not connect to signaling server. URL: ${wsUrl}`;
+        console.error("[WS] Viewer WebSocket error", e);
+        refreshBtn.disabled = true;
+    };
+
+    refreshBtn.onclick = () => {
+        if (!wsOpen) {
+            warningDiv.textContent = "WebSocket not connected. Cannot refresh streams.";
+            return;
+        }
+        warningDiv.textContent = "";
+        socket.send(JSON.stringify({ type: "get-streams" }));
+        console.log("[UI] Refresh streams button clicked, sent get-streams");
+    };
+
+    socket.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        console.log("[WS] Message received:", msg);
+
+        if (msg.type === "stream-ended") {
+            // Remove ended stream from list
+            const streamItem = Array.from(streamList.children)
+                .find(li => li.textContent === msg.streamId);
+            if (streamItem) {
+                streamItem.remove();
+            }
+
+            // If this was the current stream, clear the video
+            if (msg.streamId === currentStreamId) {
+                if (peer) {
+                    peer.close();
+                    peer = null;
+                }
+                remoteVideo.srcObject = null;
+                currentStreamId = null;
+                currentStreamerId = null;
+            }
+
+            // Show warning if no streams left
+            if (streamList.children.length === 0) {
+                warningDiv.textContent = "No streams available. Make sure a streamer is running.";
+            }
+        } else if (msg.type === "streams") {
+            streamList.innerHTML = "";
+            if (!msg.streams || msg.streams.length === 0) {
+                warningDiv.textContent = "No streams available. Make sure a streamer is running.";
+                console.log("[UI] No streams available");
+            } else {
+                warningDiv.textContent = "";
+                msg.streams.forEach((s) => {
+                    const li = document.createElement("li");
+                    li.textContent = s;
+                    li.onclick = () => connectToStream(s);
+                    streamList.appendChild(li);
+                });
+                console.log("[UI] Streams listed:", msg.streams);
+            }
+        } else if (msg.type === "offer") {
+            // Streamer sent offer, set as remote and send answer
+            if (peer) {
+                peer.close();
+                console.log("[PEER] Closed previous peer connection");
+            }
+            peer = new RTCPeerConnection();
+            peer.ontrack = (e) => {
+                remoteVideo.srcObject = e.streams[0];
+                console.log("[MEDIA] Remote stream received and set to video element");
+            };
+            peer.onicecandidate = (e) => {
+                if (e.candidate) {
+                    socket.send(JSON.stringify({ type: "ice-candidate", to: msg.from, candidate: e.candidate }));
+                    console.log("[SIGNAL] ICE candidate sent to streamer", e.candidate);
+                }
+            };
+            peer.onconnectionstatechange = () => {
+                console.log("[PEER] Peer connection state:", peer.connectionState);
+            };
+            await peer.setRemoteDescription(new RTCSessionDescription(msg.offer));
+            console.log("[SIGNAL] Offer set as remote description");
+            const answer = await peer.createAnswer();
+            await peer.setLocalDescription(answer);
+            // Send answer to streamer
+            socket.send(JSON.stringify({ type: "answer", to: msg.from, answer }));
+            currentStreamerId = msg.from;
+            console.log("[SIGNAL] Answer sent to streamer", msg.from);
+        } else if (msg.type === "answer") {
+            // Not used for viewer
+            console.log("[SIGNAL] Received answer (should not happen for viewer)");
+        } else if (msg.type === "ice-candidate") {
+            if (peer && msg.candidate) {
+                try {
+                    await peer.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                    console.log("[SIGNAL] ICE candidate received from streamer", msg.candidate);
+                } catch (e) {
+                    console.warn("[SIGNAL] Failed to add ICE candidate from streamer", e);
+                }
+            }
+        }
+    };
+
+    async function connectToStream(streamId) {
+        if (peer) {
+            peer.close();
+            console.log("[PEER] Closed previous peer connection before connecting to new stream");
+            peer = null;
+        }
+        currentStreamId = streamId;
+        currentStreamerId = null;
+        // Register as viewer for this stream
+        socket.send(JSON.stringify({ type: "register", id, clientType: "viewer", streamId }));
+        console.log(`[REGISTER] Viewer registered with id=${id}, streamId=${streamId}`);
+        // Wait for streamer to send offer (handled in onmessage)
+    }
+</script>
+</body>
+</html>

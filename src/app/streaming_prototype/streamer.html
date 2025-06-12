@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Inter, system-ui, -apple-system, sans-serif;
+            background: #0e0e10;
+            color: #efeff1;
+        }
+        .container {
+            max-width: 100%;
+            padding: 10px;
+            margin: 0 auto;
+        }
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        #localVideo {
+            width: 100%;
+            max-height: 80vh;
+            object-fit: cover;
+            background: #000;
+            border-radius: 8px;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            margin: 20px 0;
+        }
+        .pause-overlay {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            border-radius: 8px;
+        }
+        button {
+            background: #00b341;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #00982f;
+        }
+        button:disabled {
+            background: #1f1f23;
+            cursor: not-allowed;
+        }
+        #warning {
+            color: #ff0000;
+            margin-top: 10px;
+        }
+        @media (max-width: 600px) {
+            button {
+                flex: 1;
+                min-width: 45%;
+                margin: 0;
+            }
+            .controls {
+                justify-content: center;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="controls">
+        <button id="start">Start Stream</button>
+        <button id="stop" disabled>Stop Stream</button>
+        <button id="pause" disabled>Pause Stream</button>
+        <button id="flip" disabled>Flip Camera</button>
+    </div>
+    <div class="video-container">
+        <video id="localVideo" autoplay muted playsinline></video>
+        <div id="pause-overlay" class="pause-overlay">
+            Stream Paused
+        </div>
+    </div>
+    <div id="warning" style="color:red; font-weight:bold; margin-top:1em;"></div>
+</div>
+<script type="module">
+    import { v4 as uuidv4 } from 'https://cdn.skypack.dev/uuid';
+
+    const localVideo = document.getElementById("localVideo");
+    const startBtn = document.getElementById("start");
+    const stopBtn = document.getElementById("stop");
+    const flipBtn = document.getElementById("flip");
+    const pauseBtn = document.getElementById("pause");
+    const warningDiv = document.getElementById("warning");
+    const pauseOverlay = document.getElementById("pause-overlay");
+    let currentCamera = 'user';
+    let isPaused = false;
+    let blankVideoTrack = null;
+    let blankAudioTrack = null;
+
+    // Warn if not HTTPS or localhost
+    if (
+        location.protocol !== "https:" &&
+        location.hostname !== "localhost" &&
+        location.hostname !== "127.0.0.1"
+    ) {
+        warningDiv.innerHTML =
+            "⚠️ Camera/mic access will NOT work over HTTP from a remote host.<br>" +
+            "Browsers require HTTPS or localhost for camera/mic access.<br><br>" +
+            "To enable HTTPS with http-server, run:<br>" +
+            "<code>http-server . -p 8080 --ssl --cert certs/cert.pem --key certs/key.pem</code><br>" +
+            "You can generate a self-signed certificate with:<br>" +
+            "<code>openssl req -new -x509 -keyout key.pem -out cert.pem -days 365 -nodes</code>";
+    }
+
+    const id = uuidv4();
+    const streamId = "stream-" + id;
+    // Use dynamic WSS URL based on current hostname
+    const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+    const wsHost = location.hostname;
+    const wsPort = 3000;
+    const wsUrl = `${wsProtocol}//${wsHost}:${wsPort}`;
+    const socket = new WebSocket(wsUrl);
+
+    let localStream = null;
+    // Map of viewerId -> RTCPeerConnection
+    const peers = new Map();
+
+    let wsOpen = false;
+
+    socket.onopen = () => {
+        wsOpen = true;
+        console.log("[WS] Streamer WebSocket connected to", wsUrl);
+        warningDiv.textContent = "";
+    };
+
+    socket.onclose = (e) => {
+        wsOpen = false;
+        console.log("[WS] Streamer WebSocket closed", e);
+        if (e.code === 1015) {
+            // Redirect to signaling server to accept certificate
+            const signalingUrl = `https://${wsHost}:${wsPort}/streamer`;
+            console.log("[WS] Redirecting to accept certificate:", signalingUrl);
+            window.location.href = signalingUrl;
+            return;
+        }
+        let extra = "";
+        if (e.code === 1015) {
+            extra = `
+                    <br><b>WebSocket error code 1015:</b> This usually means a TLS/SSL handshake failure.<br>
+                    <ul>
+                      <li>Did you accept the self-signed certificate warning in your browser?</li>
+                      <li>Are you using the <b>same hostname/IP</b> in the browser URL and for your certificate?</li>
+                      <li>If you use <b>localhost</b> in the browser, your cert must be for localhost.<br>
+                          If you use your LAN IP (e.g. 192.168.x.x), your cert must be for that IP.</li>
+                      <li>Try opening <b>https://${wsHost}:3000</b> in your browser and accept the certificate warning, then reload this page.</li>
+                      <li>If you changed your IP/hostname, regenerate your certs with the correct Common Name (CN).</li>
+                    </ul>
+                `;
+        }
+        warningDiv.innerHTML = `WebSocket connection to signaling server closed.<br>
+                <b>URL:</b> ${wsUrl}<br>
+                <b>Code:</b> ${e.code} <b>Reason:</b> ${e.reason}<br>
+                ${extra}`;
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+        flipBtn.disabled = true;
+        pauseBtn.disabled = true;
+    };
+
+    socket.onerror = (e) => {
+        wsOpen = false;
+        console.error("[WS] Streamer WebSocket error", e);
+        warningDiv.textContent = `WebSocket connection error. Check your server and network. URL: ${wsUrl}`;
+        startBtn.disabled = true;
+        stopBtn.disabled = true;
+        flipBtn.disabled = true;
+        pauseBtn.disabled = true;
+    };
+
+    async function createBlankVideoTrack() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const stream = canvas.captureStream();
+        return stream.getVideoTracks()[0];
+    }
+
+    async function createBlankAudioTrack() {
+        const ctx = new AudioContext();
+        const oscillator = ctx.createOscillator();
+        const dst = oscillator.connect(ctx.createMediaStreamDestination());
+        oscillator.start();
+        const track = dst.stream.getAudioTracks()[0];
+        track.enabled = false;
+        return track;
+    }
+
+    startBtn.onclick = async () => {
+        if (!wsOpen) {
+            warningDiv.textContent = "WebSocket not connected. Cannot start stream.";
+            return;
+        }
+        // Check for mediaDevices and getUserMedia support
+        if (
+            !navigator.mediaDevices ||
+            typeof navigator.mediaDevices.getUserMedia !== "function"
+        ) {
+            alert("Camera/mic not supported on this device or browser.");
+            return;
+        }
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: currentCamera },
+                audio: true
+            });
+            // Create blank tracks for pause functionality
+            blankVideoTrack = await createBlankVideoTrack();
+            blankAudioTrack = await createBlankAudioTrack();
+
+            localVideo.srcObject = localStream;
+            socket.send(JSON.stringify({ type: "register", id, clientType: "streamer", streamId }));
+            console.log(`[REGISTER] Streamer registered with id=${id}, streamId=${streamId}`);
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            flipBtn.disabled = false;
+            pauseBtn.disabled = false;
+        } catch (err) {
+            alert("Could not access camera/mic: " + err.message);
+            console.error("[MEDIA] getUserMedia error:", err);
+        }
+    };
+
+    flipBtn.onclick = async () => {
+        currentCamera = currentCamera === 'user' ? 'environment' : 'user';
+        try {
+            const newStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: currentCamera },
+                audio: true
+            });
+
+            // Replace tracks in all peer connections
+            const videoTrack = newStream.getVideoTracks()[0];
+            peers.forEach(peer => {
+                const sender = peer.getSenders().find(s => s.track.kind === 'video');
+                if (sender) sender.replaceTrack(videoTrack);
+            });
+
+            // Update local video
+            localStream.getVideoTracks()[0].stop();
+            localStream = newStream;
+            localVideo.srcObject = newStream;
+        } catch (err) {
+            console.error("[MEDIA] Failed to flip camera:", err);
+            alert("Failed to flip camera: " + err.message);
+        }
+    };
+
+    pauseBtn.onclick = async () => {
+        isPaused = !isPaused;
+        pauseBtn.textContent = isPaused ? "Resume Stream" : "Pause Stream";
+        pauseOverlay.style.display = isPaused ? "flex" : "none";
+
+        if (isPaused) {
+            // Replace tracks with blank ones
+            peers.forEach(peer => {
+                peer.getSenders().forEach(sender => {
+                    if (sender.track.kind === "video") {
+                        sender.replaceTrack(blankVideoTrack);
+                    } else if (sender.track.kind === "audio") {
+                        sender.replaceTrack(blankAudioTrack);
+                    }
+                });
+            });
+            // Hide local video
+            localVideo.srcObject = new MediaStream([blankVideoTrack]);
+        } else {
+            // Restore original tracks
+            const videoTrack = localStream.getVideoTracks()[0];
+            const audioTrack = localStream.getAudioTracks()[0];
+            peers.forEach(peer => {
+                peer.getSenders().forEach(sender => {
+                    if (sender.track.kind === "video") {
+                        sender.replaceTrack(videoTrack);
+                    } else if (sender.track.kind === "audio") {
+                        sender.replaceTrack(audioTrack);
+                    }
+                });
+            });
+            // Restore local video
+            localVideo.srcObject = localStream;
+        }
+    };
+
+    socket.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        console.log("[WS] Message received:", msg);
+
+        if (msg.type === "viewer-joined") {
+            // New viewer wants to connect, create a peer connection for them
+            const viewerId = msg.viewerId;
+            if (peers.has(viewerId)) {
+                console.log(`[PEER] Already connected to viewer ${viewerId}`);
+                return; // already connected
+            }
+
+            const peer = new RTCPeerConnection();
+            localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+
+            peer.onicecandidate = (e) => {
+                if (e.candidate) {
+                    socket.send(JSON.stringify({
+                        type: "ice-candidate",
+                        to: viewerId,
+                        candidate: e.candidate
+                    }));
+                    console.log(`[SIGNAL] ICE candidate sent to viewer ${viewerId}`, e.candidate);
+                }
+            };
+
+            peer.onconnectionstatechange = () => {
+                console.log(`[PEER] Peer connection state for viewer ${viewerId}:`, peer.connectionState);
+            };
+
+            // Create offer and send to viewer
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            socket.send(JSON.stringify({
+                type: "offer",
+                to: viewerId,
+                offer
+            }));
+            console.log(`[SIGNAL] Offer sent to viewer ${viewerId}`);
+
+            peers.set(viewerId, peer);
+        } else if (msg.type === "answer") {
+            // Viewer sent answer
+            const viewerId = msg.from;
+            const peer = peers.get(viewerId);
+            if (peer) {
+                await peer.setRemoteDescription(new RTCSessionDescription(msg.answer));
+                console.log(`[SIGNAL] Answer received from viewer ${viewerId}`);
+            } else {
+                console.warn(`[PEER] No peer found for viewer ${viewerId} to set answer`);
+            }
+        } else if (msg.type === "ice-candidate") {
+            const viewerId = msg.from;
+            const peer = peers.get(viewerId);
+            if (peer && msg.candidate) {
+                try {
+                    await peer.addIceCandidate(new RTCIceCandidate(msg.candidate));
+                    console.log(`[SIGNAL] ICE candidate received from viewer ${viewerId}`, msg.candidate);
+                } catch (e) {
+                    console.warn(`[SIGNAL] Failed to add ICE candidate from viewer ${viewerId}`, e);
+                }
+            }
+        }
+    };
+
+    stopBtn.onclick = () => {
+        // Notify server that stream is stopping
+        socket.send(JSON.stringify({
+            type: "stream-ended",
+            streamId
+        }));
+
+        // Close all peer connections
+        peers.forEach((peer, viewerId) => {
+            peer.close();
+            console.log(`[PEER] Closed peer connection for viewer ${viewerId}`);
+        });
+        peers.clear();
+        // Stop local stream
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localVideo.srcObject = null;
+            localStream = null;
+        }
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        flipBtn.disabled = true;
+        pauseBtn.disabled = true;
+        pauseOverlay.style.display = "none";
+        isPaused = false;
+        console.log("[STREAM] Stream stopped and all peers closed");
+        // Optionally, notify server to remove stream (handled by socket close)
+    };
+
+    window.onbeforeunload = () => {
+        socket.close();
+        stopBtn.onclick();
+        console.log("[WS] Streamer window unloading, socket closed and stream stopped");
+    };
+</script>
+</body>
+</html>
