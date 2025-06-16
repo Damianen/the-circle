@@ -1,6 +1,6 @@
 import https from "https";
 import fs from "fs";
-import { WebSocketServer } from "ws";
+import {WebSocketServer} from "ws"
 import next from "next";
 
 const dev = process.env.NODE_ENV !== 'production';
@@ -9,18 +9,20 @@ const port: any = process.env.PORT || '3000';
 const app = next({ dev, port });
 const handler = app.getRequestHandler();
 
+
 // Load SSL certificate and key (generate these if you don't have them)
 const options = {
-    key: fs.readFileSync("./certs/key.pem"),
-    cert: fs.readFileSync("./certs/cert.pem"),
+    key: fs.readFileSync("./certificates/localhost-key.pem"),
+    cert: fs.readFileSync("./certificates/localhost.pem"),
 };
 
 app.prepare().then(async () => {
 const server = https.createServer(options, (req, res) => {
+    console.log (options)
     console.log("[REQUEST] Headers:", req.headers);
 
     // Extract the page type (viewer or streamer) from either the URL or referer
-    let pageType = req.url.replace('/', ''); // from URL path
+    let pageType = req.url!.replace('/', ''); // from URL path
 
     if (!pageType || pageType === '') {
         // Try to extract from referer if URL path is empty
@@ -38,7 +40,7 @@ const server = https.createServer(options, (req, res) => {
     console.log("[REDIRECT] Page type detected:", pageType);
 
     // Construct redirect URLTypeError: WebSocket.Server is not a function
-    const redirectUrl = `https://${req.headers.host.replace('3000', '8080')}/src/${pageType}.html`;
+    const redirectUrl = `https://${req.headers.host!.replace('3000', '8080')}/src/${pageType}.html`;
     console.log("[REDIRECT] Will redirect to:", redirectUrl);
 
     res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -68,26 +70,26 @@ const server = https.createServer(options, (req, res) => {
     `);
 });
 
-const wss = new  WebSocketServer({ server });
+const wss = new  WebSocketServer({ noServer: true });
 
 /**
  * clients: Array of { id, socket, type: "streamer"|"viewer", streamId? }
  * streams: Map from streamId to { streamerSocket, streamerId, viewers: Set<viewerId> }
  */
-const clients = [];
+const clients: any[] = [];
 const streams = new Map();
 
 wss.on("connection", (socket) => {
-    let clientId = null;
+    let clientId: null = null;
     let clientType = null;
-    let clientStreamId = null;
+    let clientStreamId: null = null;
 
     console.log("[WS] New connection established");
 
     socket.on("message", (msg) => {
         let data;
         try {
-            data = JSON.parse(msg);
+            data = JSON.parse(msg.toString());
         } catch (e) {
             console.error("[WS] Invalid JSON:", msg);
             return;
@@ -209,7 +211,7 @@ wss.on("connection", (socket) => {
                 if (data.streamId && streams.has(data.streamId)) {
                     // Notify all viewers that stream has ended
                     const stream = streams.get(data.streamId);
-                    stream.viewers.forEach(viewerId => {
+                    stream.viewers.forEach((viewerId: any) => {
                         const viewer = clients.find(c => c.id === viewerId);
                         if (viewer) {
                             viewer.socket.send(JSON.stringify({
@@ -252,6 +254,14 @@ server.listen(3000, () => {
     console.log("WebRTC signaling server running at https://localhost:3000 (WSS)");
     console.log("If running on LAN, connect clients to wss://<YOUR_SERVER_IP>:3000");
     console.log("Make sure your HTML is served via HTTPS, not HTTP, or camera/mic will not work.");
+});
+
+server.on("upgrade", (request, socket, head) => {
+    console.log("[UPGRADE] Upgrade request received");
+    wss.handleUpgrade(request, socket, head, (ws) => {
+        console.log("[UPGRADE] WebSocket connection established");
+        wss.emit("connection", ws, request);
+    });
 });
 
 server.on("error", (err) => {
