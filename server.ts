@@ -1,14 +1,21 @@
-// server.js
-const https = require("https");
-const fs = require("fs");
-const WebSocket = require("ws");
+import https from "https";
+import fs from "fs";
+import { WebSocketServer } from "ws";
+import next from "next";
+
+const dev = process.env.NODE_ENV !== 'production';
+const hostname = 'localhost';
+const port: any = process.env.PORT || '3000';
+const app = next({ dev, port });
+const handler = app.getRequestHandler();
 
 // Load SSL certificate and key (generate these if you don't have them)
 const options = {
-    key: fs.readFileSync(__dirname + "/certs/key.pem"),
-    cert: fs.readFileSync(__dirname + "/certs/cert.pem"),
+    key: fs.readFileSync("./certs/key.pem"),
+    cert: fs.readFileSync("./certs/cert.pem"),
 };
 
+app.prepare().then(async () => {
 const server = https.createServer(options, (req, res) => {
     console.log("[REQUEST] Headers:", req.headers);
 
@@ -30,7 +37,7 @@ const server = https.createServer(options, (req, res) => {
 
     console.log("[REDIRECT] Page type detected:", pageType);
 
-    // Construct redirect URL
+    // Construct redirect URLTypeError: WebSocket.Server is not a function
     const redirectUrl = `https://${req.headers.host.replace('3000', '8080')}/src/${pageType}.html`;
     console.log("[REDIRECT] Will redirect to:", redirectUrl);
 
@@ -61,7 +68,7 @@ const server = https.createServer(options, (req, res) => {
     `);
 });
 
-const wss = new WebSocket.Server({ server });
+const wss = new  WebSocketServer({ server });
 
 /**
  * clients: Array of { id, socket, type: "streamer"|"viewer", streamId? }
@@ -250,4 +257,6 @@ server.listen(3000, () => {
 server.on("error", (err) => {
     console.error("[SERVER] Failed to start HTTPS/WSS server:", err);
     console.error("Check that your certs exist and the port is not in use.");
+});
+
 });

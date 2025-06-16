@@ -2,6 +2,7 @@
   "name": "the-circle",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
@@ -11,8 +12,8 @@
   "dependencies": {
     "@headlessui/react": "^2.2.4",
     "@heroicons/react": "^2.2.0",
-    "bcrypt-ts": "^7.1.0",
     "express": "^5.1.0",
+    "bcrypt-ts": "^7.1.0",
     "jose": "^6.0.11",
     "mongodb": "^6.17.0",
     "mongoose": "^8.15.1",
